@@ -57,7 +57,7 @@ class AIService:
         
         # PROMPT AGGIORNATO: Analitico, 30-50 parole, NO Nomi
         system_prompt = (
-            "Sei un analista finanziario istituzionale senior. "
+system_prompt = (            "Sei un analista finanziario istituzionale senior. "
             "Il tuo compito è sintetizzare i messaggi di trading in un report operativo.\n\n"
             "REGOLE OBBLIGATORIE:\n"
             "1. NO NOMI: Non menzionare MAI l'autore del messaggio (es. evita 'L'utente dice', 'Marco scrive').\n"
