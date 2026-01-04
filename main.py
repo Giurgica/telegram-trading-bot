@@ -98,11 +98,10 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if rilevamento_live_on_air(original_text):
         link_trovato = estrai_link(original_text)
         messaggio_hype = (
-            f"🚨 **ATTENZIONE: DIRETTA SPECIALE!**\n\n"
-            f"È appena iniziata una sessione fondamentale.\n"
-            f"🔔 **REGISTRATI ORA** per accedere al canale esclusivo e non perdere i contenuti!\n\n"
-            f"👉 **CLICCA QUI PER ENTRARE:** {link_trovato}\n\n"
-            f"_(Accesso limitato a chi aderisce ora!)_"
+            f"ATTENZIONE: DIRETTA SPECIALE APPENA INIZIATA 🚨\n\n"
+            f"Sta partendo ORA una sessione cruciale per chi vuole portare il proprio trading a un livello superiore.\n"
+            f"Registrati subito per entrare nel canale esclusivo e seguire la diretta in tempo reale, senza perdere nemmeno un contenuto operativo.\n\n"
+            f"🔗 Unisciti ora: @The_Edge_Lab_Italia"
         )
         
         try:
