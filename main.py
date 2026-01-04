@@ -1,8 +1,9 @@
 import os
 import logging
-import re
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from huggingface_hub import InferenceClient
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -11,6 +12,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
 TARGET_GROUP_ID = os.getenv("TARGET_GROUP_ID")
 SOURCE_GROUP_ID = os.getenv("SOURCE_GROUP_ID")
 
@@ -25,37 +27,29 @@ except ValueError:
     logger.error("ERRORE: Gli ID devono essere numeri interi.")
     exit(1)
 
-def estrai_title_e_sintesi(testo):
-    """Estrae automaticamente titolo e sintesi breve da un messaggio lungo."""
-    # Estrai prima linea come title
-    linee = testo.strip().split('\n')
-    title = linee[0][:70] if linee else "Analisi di Trading"
-    
-    # Estrai concetto chiave: cerca percentuali, numeri significativi
-    numeri = re.findall(r'-?\d+[.,]?\d*%?', testo)
-    
-    # Estrai parole chiave: "Mani Forti", "retail", "accumulazione", "capitolazione"
-    keyword_pairs = ["Mani Forti", "retail", "accumulazione", "panico", "volume", "order flow", "liquidità"]
-    keywords_trovate = [kw for kw in keyword_pairs if kw.lower() in testo.lower()]
-    
-    # Costruisci sintesi usando formula provocatoria
-    if numeri:
-        numero = numeri[0]
-        title_provocatorio = f"💣 {numero} || Il Prezzo Inganna, le Mani Forti Sanno la Verità"
-    else:
-        title_provocatorio = f"💣 Analisi Critica || Mentre Tutti Vendono in Panico..."
-    
-    if keywords_trovate:
-        insight = f"Retail in capitolazione | {', '.join(keywords_trovate[:2])} mostrano il gioco vero"
-    else:
-        insight = "Scopri cosa nascondono i numeri sotto la superficie"
-    
-    sintesi = f"{title_provocatorio}\n{insight}\nSai distinguere la paura dall'opportunità?"
-    
-    return sintesi
+# Inizializza Hugging Face client
+if HF_TOKEN:
+    hf_client = InferenceClient(model="facebook/bart-large-cnn", token=HF_TOKEN)
+else:
+    hf_client = None
+    logger.warning("Avviso: HF_TOKEN non impostato. AI disabilitato.")
+
+def genera_riassunto_ai(testo):
+    """Genera un vero riassunto usando Hugging Face AI."""
+    if not hf_client:
+        return None
+    try:
+        summary = hf_client.summarization(
+            testo,
+            parameters={"min_length": 30, "max_length": 80, "do_sample": False}
+        )
+        return summary.summary_text if hasattr(summary, 'summary_text') else str(summary)
+    except Exception as e:
+        logger.error(f"Errore HF AI: {e}")
+        return None
 
 async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Invia SUBITO ogni messaggio dal gruppo sorgente al target."""
+    """Invia SUBITO ogni messaggio con riassunti REALI via AI."""
     
     if update.effective_chat.id != SOURCE_GROUP_ID:
         return
@@ -66,7 +60,7 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
     original_text = update.message.text
     user = update.message.from_user.first_name or "Utente"
     
-    # RILEVAMENTO LIVE ON AIR CON LINK
+    # RILEVAMENTO LIVE ON AIR
     text_upper = original_text.upper()
     keywords_live = ["LIVE ON AIR", "IN DIRETTA", "🔴"]
     keywords_link = ["HTTP", "ZOOM", "YOUTUBE", "MEET"]
@@ -75,7 +69,6 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
     has_link = any(k in text_upper for k in keywords_link)
     
     if is_live and has_link:
-        # Messaggio personalizzato di incentivo per LIVE
         messaggio_live = (
             f"ATTENZIONE: DIRETTA SPECIALE APPENA INIZIATA 🚨\n\n"
             f"Sta partendo ORA una sessione cruciale per chi vuole portare il proprio trading a un livello superiore.\n"
@@ -83,31 +76,35 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"🔗 Unisciti ora: @The_Edge_Lab_Italia"
         )
         try:
-            await context.bot.send_message(
-                chat_id=TARGET_GROUP_ID,
-                text=messaggio_live
-            )
-            logger.info("LIVE rilevata: messaggio incentivo inviato ISTANTANEAMENTE")
+            await context.bot.send_message(chat_id=TARGET_GROUP_ID, text=messaggio_live)
+            logger.info("LIVE rilevata: messaggio incentivo inviato")
         except Exception as e:
             logger.error(f"Errore invio LIVE: {e}")
         return
     
-    # PER MESSAGGI LUNGHI: USA FORMULA INTELLIGENTE
+    # MESSAGGI LUNGHI: USA HUGGING FACE PER VERI RIASSUNTI
     if len(original_text) > 100:
-        # Genera sintesi provocatoria usando formula ChatGPT
-        messaggio_finale = estrai_title_e_sintesi(original_text)
-        messaggio_finale += f"\n\n🔍 Analisi completa e livelli di ingresso → @The_Edge_Lab_Italia"
+        logger.info(f"Messaggio lungo ({len(original_text)} chars). Generando riassunto AI...")
+        loop = asyncio.get_running_loop()
+        riassunto = await loop.run_in_executor(None, genera_riassunto_ai, original_text)
+        
+        if riassunto:
+            messaggio_finale = (
+                f"📝 **Riassunto da {user}:**\n"
+                f"{riassunto}\n\n"
+                f"🔍 Per l'analisi completa e i livelli chiave → @The_Edge_Lab_Italia"
+            )
+        else:
+            # Fallback se AI fallisce
+            messaggio_finale = f"👤 **{user}:** {original_text}"
     else:
         # Messaggi brevi: invia diretto
-        messaggio_finale = f"👤 **{user}**: {original_text}"
+        messaggio_finale = f"👤 **{user}:** {original_text}"
     
     # INVIA AL GRUPPO TARGET
     try:
-        await context.bot.send_message(
-            chat_id=TARGET_GROUP_ID,
-            text=messaggio_finale
-        )
-        logger.info(f"Messaggio inoltrato ISTANTANEAMENTE da {user}")
+        await context.bot.send_message(chat_id=TARGET_GROUP_ID, text=messaggio_finale)
+        logger.info(f"Messaggio inoltrato da {user}")
     except Exception as e:
         logger.error(f"Errore nell'invio: {e}")
 
@@ -115,5 +112,5 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), gestisci_messaggio)
     application.add_handler(msg_handler)
-    logger.info("Bot ISTANTANEO con formula intelligente avviato. In ascolto...")
+    logger.info("Bot ISTANTANEO con AI VERI riassunti avviato. In ascolto...")
     application.run_polling()
