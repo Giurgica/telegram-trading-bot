@@ -3,7 +3,7 @@ import logging
 import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from huggingface_hub import InferenceClient
+from openai import AsyncOpenAI
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -12,7 +12,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-HF_TOKEN = os.getenv("HF_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TARGET_GROUP_ID = os.getenv("TARGET_GROUP_ID")
 SOURCE_GROUP_ID = os.getenv("SOURCE_GROUP_ID")
 
@@ -27,29 +27,51 @@ except ValueError:
     logger.error("ERRORE: Gli ID devono essere numeri interi.")
     exit(1)
 
-# Inizializza Hugging Face client
-if HF_TOKEN:
-    hf_client = InferenceClient(model="facebook/bart-large-cnn", token=HF_TOKEN)
+# Inizializza OpenAI client
+if OPENAI_API_KEY:
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 else:
-    hf_client = None
-    logger.warning("Avviso: HF_TOKEN non impostato. AI disabilitato.")
+    openai_client = None
+    logger.warning("Avviso: OPENAI_API_KEY non impostato. AI disabilitato.")
 
 def genera_riassunto_ai(testo):
-    """Genera un vero riassunto usando Hugging Face AI."""
-    if not hf_client:
+    """Genera un vero riassunto usando OpenAI GPT."""
+    if not openai_client:
         return None
     try:
-        summary = hf_client.summarization(
-            testo,
-            parameters={"min_length": 30, "max_length": 80, "do_sample": False}
-        )
-        return summary.summary_text if hasattr(summary, 'summary_text') else str(summary)
+        # Prompt intelligente per riassunti brevi e profondi
+        prompt = f"""Riassumi il seguente testo in modo BREVE ma PROFONDO. Usa max 50 parole. 
+Va bene usare abbreviazioni e punti chiave. Salta dettagli superflui.
+Testo: {testo}
+
+Riassunto:"""
+        # Questo sarà fatto con await in una funzione async
+        return prompt
     except Exception as e:
-        logger.error(f"Errore HF AI: {e}")
+        logger.error(f"Errore generazione prompt: {e}")
+        return None
+
+async def genera_riassunto_ai_async(testo):
+    """Genera un vero riassunto usando OpenAI GPT (versione async)."""
+    if not openai_client:
+        return None
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "Sei un esperto di sintesi. Riassumi sempre in modo BREVE e PROFONDO, massimo 50 parole. Usa punti chiave e abbreviazioni."},
+                {"role": "user", "content": f"Riassumi questo:\n{testo}"}
+            ],
+            max_tokens=100,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Errore OpenAI AI: {e}")
         return None
 
 async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Invia SUBITO ogni messaggio con riassunti REALI via AI."""
+    """Invia SUBITO ogni messaggio con riassunti REALI via OpenAI."""
     
     if update.effective_chat.id != SOURCE_GROUP_ID:
         return
@@ -82,11 +104,10 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Errore invio LIVE: {e}")
         return
     
-    # MESSAGGI LUNGHI: USA HUGGING FACE PER VERI RIASSUNTI
+    # MESSAGGI LUNGHI: USA OPENAI PER VERI RIASSUNTI
     if len(original_text) > 100:
         logger.info(f"Messaggio lungo ({len(original_text)} chars). Generando riassunto AI...")
-        loop = asyncio.get_running_loop()
-        riassunto = await loop.run_in_executor(None, genera_riassunto_ai, original_text)
+        riassunto = await genera_riassunto_ai_async(original_text)
         
         if riassunto:
             messaggio_finale = (
@@ -112,5 +133,5 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), gestisci_messaggio)
     application.add_handler(msg_handler)
-    logger.info("Bot ISTANTANEO con AI VERI riassunti avviato. In ascolto...")
+    logger.info("Bot ISTANTANEO con AI VERI riassunti (OpenAI) avviato. In ascolto...")
     application.run_polling()
