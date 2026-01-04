@@ -2,170 +2,141 @@ import os
 import logging
 import asyncio
 from typing import Optional
+from dataclasses import dataclass
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.constants import ParseMode
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
+
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 
+# --- CONFIGURAZIONE LOGGING ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger("EdgeLabBot")
 
-logger = logging.getLogger(__name__)
+# --- CONFIGURAZIONE ENVIRONMENT ---
+@dataclass
+class BotConfig:
+    telegram_token: str
+    openai_api_key: str  # Qui ci va la chiave di Google (AIza...)
+    target_group_id: int
+    source_group_id: int
+    cta_link: str = "@The_Edge_Lab_Italia"
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("OPENAI_API_KEY")  # Usa la chiave Google (rinominata da OPENAI_API_KEY per compatibilità)
-TARGET_GROUP_ID = os.getenv("TARGET_GROUP_ID")
-SOURCE_GROUP_ID = os.getenv("SOURCE_GROUP_ID")
-
-if not TELEGRAM_TOKEN or not TARGET_GROUP_ID or not SOURCE_GROUP_ID:
-    logger.error("ERRORE: Mancano le Environment Variables")
-    exit(1)
-
-try:
-    TARGET_GROUP_ID = int(TARGET_GROUP_ID)
-    SOURCE_GROUP_ID = int(SOURCE_GROUP_ID)
-except ValueError:
-    logger.error("ERRORE: Gli ID devono essere numeri interi.")
-    exit(1)
-
-# --- SERVIZIO AI (Nativo Google Gemini) ---
-class AIService:
-    """Gestisce l'interazione diretta con Google Gemini (Gratis)."""
-    def __init__(self, api_key: str):
-        if not api_key:
-            logger.error("API Key Google mancante!")
-            self.model = None
-            return
-        
-        # Configurazione globale della libreria
-        genai.configure(api_key=api_key)
-        
-        # Configurazione del modello con System Instruction
-        # Nota: gemini-1.5-flash è il modello corretto, veloce e gratuito.
-        self.model = genai.GenerativeModel(
-            model_name='gemini-1.5-flash',
-            system_instruction=(
-                "Sei un analista finanziario esperto. "
-                "Riassumi i messaggi di trading in italiano. "
-                "Massimo 50 parole. Sii diretto, operativo e urgente. "
-                "Evita frasi introduttive come 'Ecco il riassunto'."
-            )
-        )
-    
-    async def summarize(self, text: str, retries: int = 1) -> Optional[str]:
-        """Genera riassunto usando Google Gemini Nativo."""
-        if not self.model:
-            return None
-        
-        # Configurazione parametri di generazione
-        generation_config = genai.GenerationConfig(
-            temperature=0.3,
-            max_output_tokens=150,
-        )
-        
-        for attempt in range(retries + 1):
-            try:
-                # Chiamata asincrona nativa
-                response = await self.model.generate_content_async(
-                    f"Analizza e riassumi questo messaggio:\n{text}",
-                    generation_config=generation_config
-                )
-                
-                # Verifica che la risposta sia valida
-                if response.text:
-                    return response.text.strip()
-                    
-            except google_exceptions.ResourceExhausted:
-                logger.warning("Quota gratuita Gemini superata (ResourceExhausted).")
-                return None  # inutile riprovare subito se la quota è finita
-            except google_exceptions.NotFound:
-                # Se flash fallisce, fallback su gemini-pro
-                logger.warning(f"Modello Flash non trovato, provo fallback su Pro...")
-                return await self._fallback_summarize(text)
-            except Exception as e:
-                logger.warning(f"Tentativo Gemini {attempt+1} fallito: {e}")
-                await asyncio.sleep(1)
-        
-        return None
-    
-    async def _fallback_summarize(self, text: str) -> Optional[str]:
-        """Metodo di emergenza se il modello Flash non risponde."""
+    @classmethod
+    def load(cls):
         try:
-            fallback_model = genai.GenerativeModel('gemini-pro')
-            response = await fallback_model.generate_content_async(
-                f"Riassumi in breve (max 50 parole) come analista finanziario:\n{text}"
+            config = cls(
+                telegram_token=os.getenv("TELEGRAM_TOKEN", ""),
+                openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+                target_group_id=int(os.getenv("TARGET_GROUP_ID", "0")),
+                source_group_id=int(os.getenv("SOURCE_GROUP_ID", "0"))
+            )
+            if not config.telegram_token or not config.openai_api_key:
+                raise ValueError("Token Telegram o API Key mancanti.")
+            return config
+        except ValueError as e:
+            logger.critical(f"Errore Config: {e}")
+            exit(1)
+
+# --- SERVIZIO AI (Google Gemini Nativo) ---
+class AIService:
+    def __init__(self, api_key: str):
+        genai.configure(api_key=api_key)
+        self.model_name = 'gemini-1.5-flash'
+        
+        # --- DEBUG AVVIO: Stampa i modelli disponibili ---
+        try:
+            logger.info("🔍 Cerco modelli disponibili...")
+            available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            logger.info(f"Modelli Trovati: {available_models}")
+            
+            # Verifica se il modello scelto è nella lista
+            full_model_name = f"models/{self.model_name}"
+            if full_model_name not in available_models and self.model_name not in available_models:
+                logger.warning(f"⚠️ {self.model_name} non trovato esattamente nella lista. Userò il primo disponibile o fallback.")
+        except Exception as e:
+            logger.error(f"Errore nel listare i modelli: {e}")
+        
+        # Configurazione Modello
+        self.model = genai.GenerativeModel(
+            model_name=self.model_name,
+            system_instruction="Sei un analista finanziario. Riassumi messaggi di trading in italiano (max 50 parole). Diretto e operativo."
+        )
+
+    async def summarize(self, text: str) -> Optional[str]:
+        try:
+            response = await self.model.generate_content_async(
+                f"Riassumi questo:\n{text}",
+                generation_config=genai.GenerationConfig(
+                    temperature=0.3,
+                    max_output_tokens=150
+                )
             )
             return response.text.strip() if response.text else None
         except Exception as e:
-            logger.error(f"Anche il fallback ha fallito: {e}")
+            logger.error(f"Errore AI ({self.model_name}): {e}")
             return None
 
-# Inizializzazione AI
-ai_service = AIService(GEMINI_API_KEY)
+# --- BOT LOGIC ---
+class TelegramForwarderBot:
+    def __init__(self, config: BotConfig):
+        self.config = config
+        self.ai = AIService(config.openai_api_key)
 
-async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Invia SUBITO ogni messaggio con riassunti VERI via Gemini."""
-    
-    if update.effective_chat.id != SOURCE_GROUP_ID:
-        return
-    
-    if not update.message or not update.message.text:
-        return
-    
-    original_text = update.message.text
-    user = update.message.from_user.first_name or "Utente"
-    
-    # RILEVAMENTO LIVE ON AIR
-    text_upper = original_text.upper()
-    keywords_live = ["LIVE ON AIR", "IN DIRETTA", "🔴"]
-    keywords_link = ["HTTP", "ZOOM", "YOUTUBE", "MEET"]
-    
-    is_live = any(k in text_upper for k in keywords_live)
-    has_link = any(k in text_upper for k in keywords_link)
-    
-    if is_live and has_link:
-        messaggio_live = (
-            f"ATTENZIONE: DIRETTA SPECIALE APPENA INIZIATA 🚨\n\n"
-            f"Sta partendo ORA una sessione cruciale per chi vuole portare il proprio trading a un livello superiore.\n"
-            f"Registrati subito per entrare nel canale esclusivo e seguire la diretta in tempo reale, senza perdere nemmeno un contenuto operativo.\n\n"
-            f"🔗 Unisciti ora: @The_Edge_Lab_Italia"
-        )
-        try:
-            await context.bot.send_message(chat_id=TARGET_GROUP_ID, text=messaggio_live)
-            logger.info("LIVE rilevata: messaggio incentivo inviato")
-        except Exception as e:
-            logger.error(f"Errore invio LIVE: {e}")
-        return
-    
-    # MESSAGGI LUNGHI: USA GEMINI PER VERI RIASSUNTI
-    if len(original_text) > 100:
-        logger.info(f"Messaggio lungo ({len(original_text)} chars). Generando riassunto AI...")
-        riassunto = await ai_service.summarize(original_text)
+    def _sanitize_html(self, text: str) -> str:
+        return text.replace("<", "<").replace(">", ">").replace("&", "&")
+
+    async def process_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_chat.id != self.config.source_group_id:
+            return
+        if not update.message or not update.message.text:
+            return
         
-        if riassunto:
-            messaggio_finale = (
-                f"📝 **Riassunto da {user}:**\n"
-                f"{riassunto}\n\n"
-                f"🔍 Per l'analisi completa e i livelli chiave → @The_Edge_Lab_Italia"
+        original_text = update.message.text
+        user = self._sanitize_html(update.message.from_user.first_name or "Trader")
+        
+        # Logica LIVE
+        if "LIVE" in original_text.upper() and "HTTP" in original_text.upper():
+            await context.bot.send_message(
+                chat_id=self.config.target_group_id,
+                text=f"🚨 **LIVE IN CORSO!**\nUnisciti ora: {self.config.cta_link}",
+                parse_mode=ParseMode.HTML
             )
+            return
+        
+        # Logica Riassunto
+        messaggio_finale = ""
+        if len(original_text) > 100:
+            logger.info(f"Generazione riassunto per messaggio di {len(original_text)} char...")
+            await context.bot.send_chat_action(chat_id=self.config.target_group_id, action="typing")
+            riassunto = await self.ai.summarize(original_text)
+            if riassunto:
+                messaggio_finale = f"📝 **Flash ({user}):**\n{self._sanitize_html(riassunto)}\n👉 {self.config.cta_link}"
+            else:
+                messaggio_finale = f"👤**{user}:**\n{self._sanitize_html(original_text)}"
         else:
-            messaggio_finale = f"👤 **{user}:** {original_text}"
-    else:
-        # Messaggi brevi: invia diretto
-        messaggio_finale = f"👤 **{user}:** {original_text}"
-    
-    # INVIA AL GRUPPO TARGET
-    try:
-        await context.bot.send_message(chat_id=TARGET_GROUP_ID, text=messaggio_finale)
-        logger.info(f"Messaggio inoltrato da {user}")
-    except Exception as e:
-        logger.error(f"Errore nell'invio: {e}")
+            messaggio_finale = f"👤**{user}:** {self._sanitize_html(original_text)}"
+        
+        try:
+            await context.bot.send_message(
+                chat_id=self.config.target_group_id,
+                text=messaggio_finale,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.error(f"Errore invio: {e}")
 
+# --- MAIN ---
 if __name__ == '__main__':
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), gestisci_messaggio)
-    application.add_handler(msg_handler)
-    logger.info("Bot ISTANTANEO con AI GEMINI GRATIS (Google) avviato. In ascolto...")
-    application.run_polling()
+    conf = BotConfig.load()
+    bot = TelegramForwarderBot(conf)
+    app = ApplicationBuilder().token(conf.telegram_token).build()
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), bot.process_message))
+    logger.info("✅ Bot Avviato con Google Gemini Nativo")
+    app.run_polling()
