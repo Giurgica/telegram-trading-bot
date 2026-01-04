@@ -1,18 +1,21 @@
 import os
 import logging
 import asyncio
+from typing import Optional
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("OPENAI_API_KEY")  # Usa la stessa var con chiave Google
+GEMINI_API_KEY = os.getenv("OPENAI_API_KEY")  # Usa la chiave Google (rinominata da OPENAI_API_KEY per compatibilità)
 TARGET_GROUP_ID = os.getenv("TARGET_GROUP_ID")
 SOURCE_GROUP_ID = os.getenv("SOURCE_GROUP_ID")
 
@@ -27,35 +30,80 @@ except ValueError:
     logger.error("ERRORE: Gli ID devono essere numeri interi.")
     exit(1)
 
-# Inizializza Google Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-else:
-    model = None
-    logger.warning("Avviso: GEMINI_API_KEY non impostato. AI disabilitato.")
-
-async def genera_riassunto_ai(testo):
-    """Genera un vero riassunto usando Google Gemini."""
-    if not model:
-        return None
-    try:
-        prompt = f"""Riassumi questo testo di trading in modo BREVE e PROFONDO (max 50 parole).
-Va bene usare abbreviazioni e punti chiave. Salta dettagli superflui.
-Testo: {testo}
-
-Riassunto:"""
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                'temperature': 0.3,
-                'max_output_tokens': 100,
-            }
+# --- SERVIZIO AI (Nativo Google Gemini) ---
+class AIService:
+    """Gestisce l'interazione diretta con Google Gemini (Gratis)."""
+    def __init__(self, api_key: str):
+        if not api_key:
+            logger.error("API Key Google mancante!")
+            self.model = None
+            return
+        
+        # Configurazione globale della libreria
+        genai.configure(api_key=api_key)
+        
+        # Configurazione del modello con System Instruction
+        # Nota: gemini-1.5-flash è il modello corretto, veloce e gratuito.
+        self.model = genai.GenerativeModel(
+            model_name='gemini-1.5-flash',
+            system_instruction=(
+                "Sei un analista finanziario esperto. "
+                "Riassumi i messaggi di trading in italiano. "
+                "Massimo 50 parole. Sii diretto, operativo e urgente. "
+                "Evita frasi introduttive come 'Ecco il riassunto'."
+            )
         )
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"Errore Gemini AI: {e}")
+    
+    async def summarize(self, text: str, retries: int = 1) -> Optional[str]:
+        """Genera riassunto usando Google Gemini Nativo."""
+        if not self.model:
+            return None
+        
+        # Configurazione parametri di generazione
+        generation_config = genai.GenerationConfig(
+            temperature=0.3,
+            max_output_tokens=150,
+        )
+        
+        for attempt in range(retries + 1):
+            try:
+                # Chiamata asincrona nativa
+                response = await self.model.generate_content_async(
+                    f"Analizza e riassumi questo messaggio:\n{text}",
+                    generation_config=generation_config
+                )
+                
+                # Verifica che la risposta sia valida
+                if response.text:
+                    return response.text.strip()
+                    
+            except google_exceptions.ResourceExhausted:
+                logger.warning("Quota gratuita Gemini superata (ResourceExhausted).")
+                return None  # inutile riprovare subito se la quota è finita
+            except google_exceptions.NotFound:
+                # Se flash fallisce, fallback su gemini-pro
+                logger.warning(f"Modello Flash non trovato, provo fallback su Pro...")
+                return await self._fallback_summarize(text)
+            except Exception as e:
+                logger.warning(f"Tentativo Gemini {attempt+1} fallito: {e}")
+                await asyncio.sleep(1)
+        
         return None
+    
+    async def _fallback_summarize(self, text: str) -> Optional[str]:
+        """Metodo di emergenza se il modello Flash non risponde."""
+        try:
+            fallback_model = genai.GenerativeModel('gemini-pro')
+            response = await fallback_model.generate_content_async(
+                f"Riassumi in breve (max 50 parole) come analista finanziario:\n{text}"
+            )
+            return response.text.strip() if response.text else None
+        except Exception as e:
+            logger.error(f"Anche il fallback ha fallito: {e}")
+            return None
+
+# Inizializzazione AI
+ai_service = AIService(GEMINI_API_KEY)
 
 async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Invia SUBITO ogni messaggio con riassunti VERI via Gemini."""
@@ -94,7 +142,7 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # MESSAGGI LUNGHI: USA GEMINI PER VERI RIASSUNTI
     if len(original_text) > 100:
         logger.info(f"Messaggio lungo ({len(original_text)} chars). Generando riassunto AI...")
-        riassunto = await genera_riassunto_ai(original_text)
+        riassunto = await ai_service.summarize(original_text)
         
         if riassunto:
             messaggio_finale = (
