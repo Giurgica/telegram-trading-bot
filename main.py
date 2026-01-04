@@ -3,7 +3,7 @@ import logging
 import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from openai import AsyncOpenAI
+import google.generativeai as genai
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -12,7 +12,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("OPENAI_API_KEY")  # Usa la stessa var con chiave Google
 TARGET_GROUP_ID = os.getenv("TARGET_GROUP_ID")
 SOURCE_GROUP_ID = os.getenv("SOURCE_GROUP_ID")
 
@@ -27,51 +27,38 @@ except ValueError:
     logger.error("ERRORE: Gli ID devono essere numeri interi.")
     exit(1)
 
-# Inizializza OpenAI client
-if OPENAI_API_KEY:
-    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+# Inizializza Google Gemini
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
 else:
-    openai_client = None
-    logger.warning("Avviso: OPENAI_API_KEY non impostato. AI disabilitato.")
+    model = None
+    logger.warning("Avviso: GEMINI_API_KEY non impostato. AI disabilitato.")
 
-def genera_riassunto_ai(testo):
-    """Genera un vero riassunto usando OpenAI GPT."""
-    if not openai_client:
+async def genera_riassunto_ai(testo):
+    """Genera un vero riassunto usando Google Gemini."""
+    if not model:
         return None
     try:
-        # Prompt intelligente per riassunti brevi e profondi
-        prompt = f"""Riassumi il seguente testo in modo BREVE ma PROFONDO. Usa max 50 parole. 
+        prompt = f"""Riassumi questo testo di trading in modo BREVE e PROFONDO (max 50 parole).
 Va bene usare abbreviazioni e punti chiave. Salta dettagli superflui.
 Testo: {testo}
 
 Riassunto:"""
-        # Questo sarà fatto con await in una funzione async
-        return prompt
-    except Exception as e:
-        logger.error(f"Errore generazione prompt: {e}")
-        return None
-
-async def genera_riassunto_ai_async(testo):
-    """Genera un vero riassunto usando OpenAI GPT (versione async)."""
-    if not openai_client:
-        return None
-    try:
-        response = await openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "Sei un esperto di sintesi. Riassumi sempre in modo BREVE e PROFONDO, massimo 50 parole. Usa punti chiave e abbreviazioni."},
-                {"role": "user", "content": f"Riassumi questo:\n{testo}"}
-            ],
-            max_tokens=100,
-            temperature=0.3
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                'temperature': 0.3,
+                'max_output_tokens': 100,
+            }
         )
-        return response.choices[0].message.content.strip()
+        return response.text.strip()
     except Exception as e:
-        logger.error(f"Errore OpenAI AI: {e}")
+        logger.error(f"Errore Gemini AI: {e}")
         return None
 
 async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Invia SUBITO ogni messaggio con riassunti REALI via OpenAI."""
+    """Invia SUBITO ogni messaggio con riassunti VERI via Gemini."""
     
     if update.effective_chat.id != SOURCE_GROUP_ID:
         return
@@ -104,10 +91,10 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Errore invio LIVE: {e}")
         return
     
-    # MESSAGGI LUNGHI: USA OPENAI PER VERI RIASSUNTI
+    # MESSAGGI LUNGHI: USA GEMINI PER VERI RIASSUNTI
     if len(original_text) > 100:
         logger.info(f"Messaggio lungo ({len(original_text)} chars). Generando riassunto AI...")
-        riassunto = await genera_riassunto_ai_async(original_text)
+        riassunto = await genera_riassunto_ai(original_text)
         
         if riassunto:
             messaggio_finale = (
@@ -116,7 +103,6 @@ async def gestisci_messaggio(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"🔍 Per l'analisi completa e i livelli chiave → @The_Edge_Lab_Italia"
             )
         else:
-            # Fallback se AI fallisce
             messaggio_finale = f"👤 **{user}:** {original_text}"
     else:
         # Messaggi brevi: invia diretto
@@ -133,5 +119,5 @@ if __name__ == '__main__':
     application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), gestisci_messaggio)
     application.add_handler(msg_handler)
-    logger.info("Bot ISTANTANEO con AI VERI riassunti (OpenAI) avviato. In ascolto...")
+    logger.info("Bot ISTANTANEO con AI GEMINI GRATIS (Google) avviato. In ascolto...")
     application.run_polling()
