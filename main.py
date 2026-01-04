@@ -1,3 +1,4 @@
+53
 import os
 import logging
 import asyncio
@@ -47,7 +48,7 @@ class BotConfig:
 class AIService:
     def __init__(self, api_key: str):
         genai.configure(api_key=api_key)
-        self.model_name = 'gemini-1.5-flash'
+        self.model_name = 'gemini-2.5-flash'
         
         # --- DEBUG AVVIO: Stampa i modelli disponibili ---
         try:
